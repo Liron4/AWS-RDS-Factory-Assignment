@@ -1,0 +1,89 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  The "Factory" backend that accepts RDS requests and creates GitHub PRs.
+
+Parameters:
+  GitHubTokenSecretArn:
+    Type: String
+    Description: The ARN of the AWS Secrets Manager secret holding the GitHub PAT.
+  GitHubRepo:
+    Type: String
+    Description: The repo name (e.g., 'YourUser/YourRepo').
+
+Resources:
+  RdsRequestApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: v1
+
+  RdsRequestTopic:
+    Type: AWS::SNS::Topic
+
+  RdsRequestQueue:
+    Type: AWS::SQS::Queue
+
+  SnsToSqsPolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt RdsRequestQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref RdsRequestTopic
+      Queues:
+        - !Ref RdsRequestQueue
+
+  QueueSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref RdsRequestTopic
+      Endpoint: !GetAtt RdsRequestQueue.Arn
+      Protocol: sqs
+
+  PrCreatorLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/
+      Handler: handler.lambda_handler
+      Runtime: python3.11
+      Timeout: 60
+      Environment:
+        Variables:
+          GITHUB_TOKEN_SECRET_ARN: !Ref GitHubTokenSecretArn
+          GITHUB_REPO: !Ref GitHubRepo
+          DEFAULT_DEV_SG_NAME: "rds-access-group"
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties:
+            RestApiId: !Ref RdsRequestApi
+            Path: /request-db
+            Method: post
+        SqsEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt RdsRequestQueue.Arn
+            BatchSize: 1
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt RdsRequestQueue.QueueName
+        - Statement:
+            - Effect: Allow
+              Action:
+                - secretsmanager:GetSecretValue
+              Resource: !Ref GitHubTokenSecretArn
+
+Outputs:
+  ApiEndpoint:
+    Description: "API Gateway endpoint URL"
+    Value: !Sub "https://${RdsRequestApi}.execute-api.${AWS::Region}.amazonaws.com/v1/request-db"
+  
+  SnsTopicArn:
+    Description: "SNS Topic ARN for RDS requests"
+    Value: !Ref RdsRequestTopic
